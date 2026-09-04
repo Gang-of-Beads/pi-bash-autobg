@@ -177,6 +177,14 @@ export default function activate(pi: any): void {
 				return result(renderPromoted(record, 0), record, true, 0);
 			}
 
+			// Threshold 0 is the documented opt-out: block like stock bash. It must
+			// not be confused with the runner's "deadline 0 = do not wait", which
+			// would promote instantly and mean the exact opposite.
+			if (!hardTimeoutWins && thresholdMs === 0) {
+				const record = await handle.completion;
+				return result(renderCompleted(record), record, false, elapsed(record));
+			}
+
 			const waitMs = hardTimeoutWins ? explicitTimeoutMs : thresholdMs;
 			const outcome = await awaitWithDeadline(handle, waitMs);
 
