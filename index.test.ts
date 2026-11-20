@@ -4,7 +4,13 @@
  * actually reads back, and whether a promoted task reports itself when it ends.
  */
 import assert from "node:assert";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import activate from "./index.ts";
+
+// Keep task logs out of the real agent directory.
+process.env.PI_BASH_AUTOBG_DIR = mkdtempSync(join(tmpdir(), "pi-bash-autobg-index-"));
 
 const keepalive = setInterval(() => undefined, 1000);
 
@@ -31,6 +37,7 @@ interface SentMessage {
 function mockPi() {
 	const tools = new Map<string, any>();
 	const sent: SentMessage[] = [];
+	const handlers = new Map<string, Array<() => void>>();
 	const pi = {
 		registerTool(tool: any) {
 			tools.set(tool.name, tool);
@@ -38,9 +45,16 @@ function mockPi() {
 		sendMessage(message: any, options?: any) {
 			sent.push({ message, options });
 		},
+		on(event: string, handler: () => void) {
+			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+		},
 	};
 	activate(pi as any);
-	return { tools, sent };
+	return { tools, sent, handlers };
+}
+
+function emit(handlers: Map<string, Array<() => void>>, event: string): void {
+	for (const handler of handlers.get(event) ?? []) handler();
 }
 
 function run(tool: any, args: Record<string, unknown>, signal?: AbortSignal) {
@@ -49,10 +63,10 @@ function run(tool: any, args: Record<string, unknown>, signal?: AbortSignal) {
 }
 
 /** Wait for a condition, so tests do not depend on fixed sleeps. */
-async function until(predicate: () => boolean, timeoutMs = 15_000): Promise<void> {
+async function until(predicate: () => boolean | Promise<boolean>, timeoutMs = 15_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
-		if (predicate()) return;
+		if (await predicate()) return;
 		await new Promise((r) => setTimeout(r, 25));
 	}
 	throw new Error("condition not met before timeout");
@@ -146,6 +160,56 @@ await test("bash_bg_logs reports a running task and refuses to invent one", asyn
 	const missing = await tools.get("bash_bg_logs").execute("c", { taskId: "bg_does_not_exist" });
 	assert.match(missing.output, /No running background task/);
 	tools.get("bash_bg_kill").execute("c", { taskId: result.details.taskId });
+});
+
+await test("the log of a delivered clean result is deleted", async () => {
+	process.env.PI_BASH_AUTOBG_THRESHOLD_MS = "200";
+	const { tools, sent } = mockPi();
+	const result = await run(tools.get("bash"), { command: "sleep 1; echo short-output" });
+	await until(() => sent.length > 0);
+	await until(() => !existsSync(result.details.outputPath));
+	assert.match(sent[0].message.content, /short-output/);
+});
+
+await test("the log of a failed task is kept", async () => {
+	process.env.PI_BASH_AUTOBG_THRESHOLD_MS = "200";
+	const { tools, sent } = mockPi();
+	const result = await run(tools.get("bash"), { command: "sleep 1; echo failed-output; exit 7" });
+	await until(() => sent.length > 0);
+	assert.ok(existsSync(result.details.outputPath), "a failure must stay readable after delivery");
+});
+
+await test("the log of a truncated result is kept", async () => {
+	process.env.PI_BASH_AUTOBG_THRESHOLD_MS = "200";
+	const { tools, sent } = mockPi();
+	const result = await run(tools.get("bash"), { command: "sleep 1; seq 1 4000" });
+	await until(() => sent.length > 0);
+	assert.ok(existsSync(result.details.outputPath), "a truncated tail must not lose the full log");
+});
+
+await test("a reload finds a still-running task again", async () => {
+	process.env.PI_BASH_AUTOBG_THRESHOLD_MS = "200";
+	const first = mockPi();
+	const result = await run(first.tools.get("bash"), { command: "sleep 5" });
+	assert.equal(result.details.promoted, true);
+	// /reload rebuilds the extension in the same process while the child lives on.
+	const reloaded = mockPi();
+	const logs = await reloaded.tools.get("bash_bg_logs").execute("c", { taskId: result.details.taskId });
+	assert.match(logs.output, /still running/);
+	const killed = await reloaded.tools.get("bash_bg_kill").execute("c", { taskId: result.details.taskId });
+	assert.match(killed.output, /Sent SIGTERM/);
+});
+
+await test("shutdown kills promoted tasks nothing would signal afterwards", async () => {
+	process.env.PI_BASH_AUTOBG_THRESHOLD_MS = "200";
+	const { tools, handlers } = mockPi();
+	const result = await run(tools.get("bash"), { command: "sleep 30", background: true });
+	emit(handlers, "session_shutdown");
+	// The entry only disappears once the child is really gone.
+	await until(async () => {
+		const logs = await tools.get("bash_bg_logs").execute("c", { taskId: result.details.taskId });
+		return !/still running/.test(logs.output);
+	});
 });
 
 await test("empty commands are rejected before anything is spawned", () => {

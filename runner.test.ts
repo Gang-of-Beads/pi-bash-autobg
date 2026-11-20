@@ -3,8 +3,10 @@
  * promotion dangerous rather than merely convenient.
  */
 import assert from "node:assert";
-import { existsSync, readFileSync } from "node:fs";
-import { awaitWithDeadline, readOutputTail, startTask } from "./runner.ts";
+import { existsSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { awaitWithDeadline, pruneLogs, readOutputTail, startTask } from "./runner.ts";
 
 // Promoted tasks are unref'd so a background command never holds pi hostage at
 // exit. A bare test process has no other handles, so it would drain its event
@@ -158,6 +160,23 @@ await test("zero deadline promotes immediately", async () => {
 	assert.equal(outcome.done, false);
 	handle.kill();
 	await handle.completion;
+});
+
+await test("pruning drops week-old logs and keeps fresh ones", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-bash-autobg-prune-"));
+	process.env.PI_BASH_AUTOBG_DIR = dir;
+	const stale = join(dir, "bg_stale.log");
+	const fresh = join(dir, "bg_fresh.log");
+	writeFileSync(stale, "old\n");
+	writeFileSync(fresh, "new\n");
+	const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+	utimesSync(stale, eightDaysAgo, eightDaysAgo);
+
+	pruneLogs();
+
+	assert.ok(!existsSync(stale), "a log nothing can still report on must go");
+	assert.ok(existsSync(fresh), "a fresh log must survive");
+	delete process.env.PI_BASH_AUTOBG_DIR;
 });
 
 clearInterval(keepalive);

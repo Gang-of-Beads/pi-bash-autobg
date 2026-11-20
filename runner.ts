@@ -10,7 +10,7 @@
  * waiting for it".
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -52,6 +52,46 @@ export function tasksDir(): string {
 		const fallback = join(tmpdir(), "pi-bash-autobg");
 		mkdirSync(fallback, { recursive: true });
 		return fallback;
+	}
+}
+
+/** Drop a task log. A missing file is the desired end state too. */
+export function removeLog(path: string): void {
+	try {
+		unlinkSync(path);
+	} catch {
+		// Already gone; a missing log is the desired end state either way.
+	}
+}
+
+/** Logs are only worth keeping while someone can still be told about them. */
+const LOG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Drop stale logs left behind by earlier sessions (crash, quit, reload).
+ *
+ * Best-effort on purpose: it runs on every activation, so a single unreadable
+ * entry must never be able to break the session. A task that has been running
+ * with no output at all for a week goes too; the log is empty anyway.
+ */
+export function pruneLogs(maxAgeMs: number = LOG_MAX_AGE_MS): void {
+	let dir: string;
+	let names: string[];
+	try {
+		dir = tasksDir();
+		names = readdirSync(dir);
+	} catch {
+		// An unreadable tasks directory is not a reason to fail activation.
+		return;
+	}
+	const cutoff = Date.now() - maxAgeMs;
+	for (const name of names) {
+		const path = join(dir, name);
+		try {
+			if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
+		} catch {
+			// Raced with a write or already removed; skip it.
+		}
 	}
 }
 
