@@ -154,7 +154,9 @@ await test("bash_bg_logs reports a running task and refuses to invent one", asyn
 	process.env.PI_BASH_AUTOBG_THRESHOLD_MS = "200";
 	const { tools } = mockPi();
 	const result = await run(tools.get("bash"), { command: "echo visible-now; sleep 3" });
-	const logs = await tools.get("bash_bg_logs").execute("c", { taskId: result.details.taskId });
+	// The tail is read as the log grows; a slow runner can answer before the echo was flushed.
+	let logs = await tools.get("bash_bg_logs").execute("c", { taskId: result.details.taskId });
+	await until(async () => /visible-now/.test((logs = await tools.get("bash_bg_logs").execute("c", { taskId: result.details.taskId })).output));
 	assert.match(logs.output, /visible-now/);
 	assert.match(logs.output, /still running/);
 	const missing = await tools.get("bash_bg_logs").execute("c", { taskId: "bg_does_not_exist" });
