@@ -1,6 +1,6 @@
 {
   "name": "@gang-of-beads/pi-bash-autobg",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi extension that moves a long-running bash call to the background instead of blocking the agent",
   "type": "module",
   "license": "MIT",
