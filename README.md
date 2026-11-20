@@ -50,6 +50,14 @@ Per call:
   at that point, as with ordinary `bash`. An explicit instruction to kill is not
   quietly turned into backgrounding.
 
+## Log retention
+
+A task log is deleted once its completion notification has been delivered and its
+output tail was read in full. It is kept when the task failed (non-zero exit,
+killed) or when the tail was truncated, because the log then still holds more
+than the notification did. Whatever is left over from a crash, a quit or an
+older session is pruned once it is more than seven days old, on startup.
+
 ## Companion tools
 
 - `bash_bg_logs(taskId)` — output produced so far by a promoted task.
@@ -82,6 +90,12 @@ leaks.
 **Interactive commands.** A command blocked on stdin looks exactly like a long
 computation: no output, never exits. Backgrounding one creates a task that can
 never finish. stdin is closed, so such a command fails fast and visibly instead.
+
+**Reload and shutdown.** A reload rebuilds the extension but not the process, so
+the registry of promoted tasks is hung off a global symbol instead of the
+closure: the reloaded instance still sees, and can kill, the tasks the old one
+started. `session_shutdown` kills every task still running, since afterwards
+nothing is left that could signal them.
 
 ## Tests
 

@@ -17,13 +17,16 @@
 import { Type, type Static } from "typebox";
 import {
 	awaitWithDeadline,
+	pruneLogs,
 	readOutputTail,
+	removeLog,
 	startTask,
 	type RunHandle,
 	type TaskRecord,
 } from "./runner.ts";
 
 const DEFAULT_THRESHOLD_MS = 60_000;
+const PROMOTED_KEY = Symbol.for("@gang-of-beads/pi-bash-autobg:promoted");
 /** Bound on output echoed into a tool result or a completion notification. */
 const MAX_RESULT_BYTES = 32 * 1024;
 const MAX_NOTIFY_BYTES = 8 * 1024;
@@ -49,6 +52,27 @@ interface BashDetails {
 	exitCode?: number | null;
 	outputPath: string;
 	elapsedMs: number;
+}
+
+interface PromotedTask {
+	handle: RunHandle;
+	record: TaskRecord;
+}
+
+/**
+ * The promoted-task registry.
+ *
+ * A reload builds a fresh closure but the process, and therefore the detached
+ * children, keep going, so the map cannot live in the closure: hung off a
+ * global symbol, the reloaded instance finds the tasks the old one started.
+ */
+function promotedTasks(): Map<string, PromotedTask> {
+	const store = globalThis as Record<symbol, unknown>;
+	const existing = store[PROMOTED_KEY] as Map<string, PromotedTask> | undefined;
+	if (existing) return existing;
+	const created = new Map<string, PromotedTask>();
+	store[PROMOTED_KEY] = created;
+	return created;
 }
 
 function resolveThresholdMs(): number {
@@ -119,7 +143,15 @@ function renderPromoted(record: TaskRecord, elapsedMs: number): string {
 
 export default function activate(pi: any): void {
 	/** Tasks still running after promotion, so the companion tools can see them. */
-	const promoted = new Map<string, { handle: RunHandle; record: TaskRecord }>();
+	const promoted = promotedTasks();
+
+	pruneLogs();
+
+	pi.on("session_shutdown", () => {
+		// Nothing else can signal these children once this instance is gone, and a
+		// detached child outlives the process only until pi exits.
+		for (const { handle } of promoted.values()) handle.kill();
+	});
 
 	pi.registerTool({
 		name: "bash",
@@ -256,6 +288,9 @@ export default function activate(pi: any): void {
 				// A session that has already gone away is not an error worth
 				// crashing a completion handler over.
 			}
+			// Retention: the result is delivered and fully recorded, so the log has
+			// no reader left. A failure or a truncated tail stays, to be inspected.
+			if (!truncated && record.state === "exited") removeLog(record.outputPath);
 		});
 	}
 
